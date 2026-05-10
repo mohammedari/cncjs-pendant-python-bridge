@@ -74,6 +74,5 @@ This application sends the following G-code commands:
 
 The application also listens to CNCjs Socket.IO events to handle GRBL board connections.
 
-Once a `serialport:open` event is detected, the application emits a `list` command to retrieve the list of active serial ports and stores the name of the connected serial port.
-
+Once a `serialport:change` event is detected, the application stores the name of the connected serial port.
 While the connection remains active, all G-code commands are sent to the most recently connected board.
