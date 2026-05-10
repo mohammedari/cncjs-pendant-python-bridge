@@ -5,6 +5,7 @@ import logging
 import serial
 import time
 import socketio
+import requests
 from datetime import datetime
 
 # Configure logging
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Constants
 DEFAULT_SERIAL_PORT = "/dev/ttyACM0"
 DEFAULT_BAUDRATE = 115200
-DEFAULT_CNCJS_URL = "localhost"
+DEFAULT_CNCJS_URL = "http://localhost"
 DEFAULT_CNCJS_PORT = 8000
 PENDANT_REPORT_INTERVAL = 0.02  # 20ms minimum
 JOG_FEED_RATE = 1000  # F1000
@@ -50,13 +51,26 @@ class PendantBridge:
 
     async def connect_cncjs(self):
         """Connect to CNCjs server via Socket.IO."""
-        url = f"{self.cncjs_url}:{self.cncjs_port}"
+        # Remove trailing slashes and construct proper URL
+        base_url = self.cncjs_url.rstrip('/')
+        url = f"{base_url}:{self.cncjs_port}"
         max_retries = 30
         retry_count = 0
 
         while retry_count < max_retries:
             try:
-                await self.sio.connect(url)
+                # CNCjs login
+                res = requests.post(
+                    "http://localhost:8000/api/signin",
+                    json={
+                        "token": "",
+                    }
+                )
+
+                token = res.json()["token"]
+                logger.info(f"Obtained CNCjs access token {token}")
+
+                await self.sio.connect(url, headers={"Authorization": f"Bearer {token}"})
                 logger.info(f"Connected to CNCjs server at {url}")
                 return True
             except Exception as e:
@@ -71,11 +85,10 @@ class PendantBridge:
         """Wait for GRBL board to be ready on CNCjs."""
         event_received = asyncio.Event()
 
-        @self.sio.on('controller:state')
-        def on_controller_state(data):
-            payload = data.get('payload', {})
-            if payload.get('port'):
-                self.grbl_port = payload['port']
+        @self.sio.on('serialport:change')
+        def on_serialport_change(data):
+            if data.get('port') and data.get('inuse', False):
+                self.grbl_port = data.get('port')
                 logger.info(f"GRBL board detected on port: {self.grbl_port}")
                 event_received.set()
 
@@ -145,7 +158,7 @@ class PendantBridge:
     async def send_gcode(self, command):
         """Send G-code command to CNCjs via Socket.IO."""
         try:
-            await self.sio.emit('gcode', command)
+            await self.sio.emit('write', (self.grbl_port, f"{command}\n"))
             logger.info(f"Sent G-code: {command}")
         except Exception as e:
             logger.error(f"Failed to send G-code: {e}")
