@@ -97,18 +97,18 @@ class PendantBridge:
         commands = []
 
         # Check for emergency stop
-        if pendant_data.get('emergency_stop'):
+        if pendant_data.get('emg'):
             commands.append('!')
             logger.info("Emergency stop triggered")
             return commands
 
         # Process jog commands
-        axis = pendant_data.get('axis')
-        ticks = pendant_data.get('ticks', 0)
+        axis = pendant_data.get('ax')
+        ticks = pendant_data.get('mv', 0)
 
         if axis and ticks != 0:
             # Calculate distance: rate × ticks × 0.001mm
-            rate = pendant_data.get('rate', 1)
+            rate = pendant_data.get('rt', 1)
             distance = rate * ticks * 0.001
 
             # Format G-code command: $J=G91 Xn Yn Zn Fn
