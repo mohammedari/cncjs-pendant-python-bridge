@@ -4,6 +4,15 @@
 
 Development should refer to GitHub issues, implement the content written in the issues, and create a PR.
 
+### Branching Strategy
+- **Feature branches**: Create branches starting with `feature/` for new features or enhancements
+- **Development flow**: 
+  1. Create a `feature/` branch from `master`
+  2. Implement the feature referring to the GitHub issue
+  3. Push the branch to GitHub
+  4. Create a PR to merge into `master`
+- **Direct pushes to main/master are prohibited**: All changes must go through PR review
+
 ## Project Overview
 
 This is a Python script that bridges a CNC pendant microcontroller to the CNCjs websocket interface. It reads serial input from the pendant and sends corresponding G-code commands to CNCjs.
