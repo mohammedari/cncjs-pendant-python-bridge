@@ -1,6 +1,6 @@
 # CNCjs Pendant Python Bridge
 
-Simple Python script for bridging a CNC pendant and the CNCjs websocket interface.  
+Simple Python script for bridging a CNC pendant and the CNCjs Socket.IO interface.  
 The script takes arguments for the serial port of the pendant microcontroller, as well as the IP address and port of the CNCjs server.
 
 | Parameter | Description |
@@ -22,32 +22,10 @@ This repository is maintained using the `uv` package management system. After [i
 uv run main.py
 ```
 
-If you want to run this software as a service, you can create a systemd service file like the following:
-
-```ini
-# /etc/systemd/system/cncjs-pendant-python-bridge.service
-
-[Unit]
-Description=CNCjs Pendant Python Bridge
-After=network.target
-
-[Service]
-Type=simple
-User=<YOUR_USER>
-WorkingDirectory=<YOUR_REPOSITORY_CLONED_DIRECTORY>
-ExecStart=/home/<YOUR_USER>/.local/bin/uv run main.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then enable and start the service with:
-
+For Linux system, you may need to add the user to `dialout` to access serial port.
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable cncjs-pendant-python-bridge
-sudo systemctl start cncjs-pendant-python-bridge
+sudo usermod -aG dialout $USER
+newgrp dialout
 ```
 
 ## CNC Pendant Specification
@@ -94,7 +72,7 @@ This application sends the following G-code commands:
 | `$J=G91 X1 F1000` | Jog command sent for reports with non-zero movement. The command consists of the selected axis (`X`, `Y`, `Z`, etc.), the calculated movement amount, and a fixed feed rate of `F1000`. |
 | `!` | Every report with `emg=1` is mapped to the GRBL feed hold / emergency stop command. |
 
-The application also listens to CNCjs websocket events to handle GRBL board connections.
+The application also listens to CNCjs Socket.IO events to handle GRBL board connections.
 
 Once a `serialport:open` event is detected, the application emits a `list` command to retrieve the list of active serial ports and stores the name of the connected serial port.
 

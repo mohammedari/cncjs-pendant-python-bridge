@@ -4,7 +4,7 @@ import json
 import logging
 import serial
 import time
-import websockets
+import socketio
 from datetime import datetime
 
 # Configure logging
@@ -17,12 +17,11 @@ logger = logging.getLogger(__name__)
 # Constants
 DEFAULT_SERIAL_PORT = "/dev/ttyACM0"
 DEFAULT_BAUDRATE = 115200
-DEFAULT_CNCJS_URL = "http://localhost"
+DEFAULT_CNCJS_URL = "localhost"
 DEFAULT_CNCJS_PORT = 8000
 PENDANT_REPORT_INTERVAL = 0.02  # 20ms minimum
 JOG_FEED_RATE = 1000  # F1000
 SERIAL_READ_TIMEOUT = 0.1  # 100ms
-
 
 class PendantBridge:
     def __init__(self, serial_port, baudrate, cncjs_url, cncjs_port):
@@ -31,7 +30,7 @@ class PendantBridge:
         self.cncjs_url = cncjs_url
         self.cncjs_port = cncjs_port
         self.serial_connection = None
-        self.websocket = None
+        self.sio = socketio.AsyncClient()
         self.grbl_port = None
         self.running = True
 
@@ -50,15 +49,15 @@ class PendantBridge:
             return False
 
     async def connect_cncjs(self):
-        """Connect to CNCjs server via WebSocket."""
-        ws_url = f"ws://{self.cncjs_url.replace('http://', '').replace('https://', '')}:{self.cncjs_port}"
+        """Connect to CNCjs server via Socket.IO."""
+        url = f"{self.cncjs_url}:{self.cncjs_port}"
         max_retries = 30
         retry_count = 0
 
         while retry_count < max_retries:
             try:
-                self.websocket = await websockets.connect(ws_url)
-                logger.info(f"Connected to CNCjs server at {ws_url}")
+                await self.sio.connect(url)
+                logger.info(f"Connected to CNCjs server at {url}")
                 return True
             except Exception as e:
                 retry_count += 1
@@ -70,19 +69,18 @@ class PendantBridge:
 
     async def wait_for_grbl_connection(self):
         """Wait for GRBL board to be ready on CNCjs."""
-        try:
-            async for message in self.websocket:
-                data = json.loads(message)
-                # Check if GRBL controller is connected
-                if data.get('type') == 'controller:state':
-                    controller_state = data.get('payload', {})
-                    if controller_state.get('port'):
-                        self.grbl_port = controller_state['port']
-                        logger.info(f"GRBL board detected on port: {self.grbl_port}")
-                        return True
-        except Exception as e:
-            logger.error(f"Error waiting for GRBL connection: {e}")
-        return False
+        event_received = asyncio.Event()
+
+        @self.sio.on('controller:state')
+        def on_controller_state(data):
+            payload = data.get('payload', {})
+            if payload.get('port'):
+                self.grbl_port = payload['port']
+                logger.info(f"GRBL board detected on port: {self.grbl_port}")
+                event_received.set()
+
+        await event_received.wait()
+        return True
 
     def parse_pendant_message(self, message_str):
         """Parse JSON message from pendant microcontroller."""
@@ -145,17 +143,10 @@ class PendantBridge:
                 await asyncio.sleep(PENDANT_REPORT_INTERVAL)
 
     async def send_gcode(self, command):
-        """Send G-code command to CNCjs via WebSocket."""
+        """Send G-code command to CNCjs via Socket.IO."""
         try:
-            if self.websocket:
-                message = {
-                    'id': str(datetime.now().timestamp()),
-                    'jsonrpc': '2.0',
-                    'method': 'gcode',
-                    'params': [command]
-                }
-                await self.websocket.send(json.dumps(message))
-                logger.info(f"Sent G-code: {command}")
+            await self.sio.emit('gcode', command)
+            logger.info(f"Sent G-code: {command}")
         except Exception as e:
             logger.error(f"Failed to send G-code: {e}")
 
@@ -178,7 +169,7 @@ class PendantBridge:
             logger.error("GRBL board not detected")
             if self.serial_connection:
                 self.serial_connection.close()
-            await self.websocket.close()
+            await self.sio.disconnect()
             return
 
         # Start reading pendant data
@@ -192,8 +183,7 @@ class PendantBridge:
             self.running = False
             if self.serial_connection:
                 self.serial_connection.close()
-            if self.websocket:
-                await self.websocket.close()
+            await self.sio.disconnect()
 
 
 def main():
