@@ -32,7 +32,7 @@ newgrp dialout
 
 The CNC pendant contains a microcontroller that reports its current status through serial communication whenever the state changes.
 
-The firmware for the controller is hosted in [this repository](https://github.com/nyarurato/CNC-Pendant-Firmware-for-CNCjs/tree/master).
+The firmware for the controller is hosted in [this repository](https://github.com/mohammedari/CNC-Pendant-Firmware-for-CNCjs/tree/master).
 
 Each line consists of a JSON object in the following format:
 
