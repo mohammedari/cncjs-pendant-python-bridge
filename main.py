@@ -24,6 +24,7 @@ PENDANT_REPORT_INTERVAL = 0.02  # 20ms minimum
 JOG_FEED_RATE = 1000  # F1000
 SERIAL_READ_TIMEOUT = 0.1  # 100ms
 JOG_IDLE_FLUSH_TIMEOUT = 0.1  # flush jog queue after 100ms without pendant reports
+GRBL_JOG_CANCEL = '\x85'  # GRBL extended-ASCII realtime jog cancel
 
 class PendantBridge:
     def __init__(self, serial_port, baudrate, cncjs_url, cncjs_port, jog_idle_flush_timeout):
@@ -186,10 +187,14 @@ class PendantBridge:
 
             await asyncio.sleep(PENDANT_REPORT_INTERVAL)
 
+    async def write_to_grbl(self, data):
+        """Send data to GRBL via CNCjs Socket.IO write event."""
+        await self.sio.emit('write', (self.grbl_port, data))
+
     async def send_gcode(self, command):
         """Send G-code command to CNCjs via Socket.IO."""
         try:
-            await self.sio.emit('write', (self.grbl_port, f"{command}\n"))
+            await self.write_to_grbl(f"{command}\n")
             logger.info(f"Sent G-code: {command}")
         except Exception as e:
             logger.error(f"Failed to send G-code: {e}")
@@ -197,8 +202,8 @@ class PendantBridge:
     async def flush_jog_queue(self):
         """Cancel GRBL jogging and flush remaining jog commands in CNCjs."""
         try:
-            await self.sio.emit('command', (self.grbl_port, 'jogCancel'))
-            logger.info("Sent jogCancel to flush queued jog commands")
+            await self.write_to_grbl(GRBL_JOG_CANCEL)
+            logger.info("Sent jog cancel (0x85) to flush queued jog commands")
         except Exception as e:
             logger.error(f"Failed to flush jog queue: {e}")
 
@@ -275,7 +280,7 @@ def main():
         type=float,
         default=JOG_IDLE_FLUSH_TIMEOUT,
         help=(
-            'Seconds without pendant reports before sending jogCancel to flush '
+            'Seconds without pendant reports before sending jog cancel (0x85) to flush '
             f'the jog queue (default: {JOG_IDLE_FLUSH_TIMEOUT})'
         )
     )
