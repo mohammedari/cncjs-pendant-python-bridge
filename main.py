@@ -23,6 +23,7 @@ PENDANT_REPORT_INTERVAL = 0.02  # 20ms minimum
 JOG_FEED_RATE = 1000  # F1000
 SERIAL_READ_TIMEOUT = 0.1  # 100ms
 JOG_IDLE_FLUSH_TIMEOUT = 0.1  # flush jog queue after 100ms without pendant reports
+COMMAND_WRITE_INTERVAL = 0.1  # Minimum 100ms between command writes
 GRBL_JOG_CANCEL = '\x85'  # GRBL extended-ASCII realtime jog cancel
 
 class PendantBridge:
@@ -39,9 +40,8 @@ class PendantBridge:
         self.last_pendant_message_time = None
         self.jog_flush_pending = False
         self._jog_pending = None
-        self._awaiting_ok = False
-        self._ok_event = asyncio.Event()
         self._jog_notify = asyncio.Event()
+        self._last_write_time = 0  # Track last command write time for 100ms interval
 
     async def connect_serial(self):
         """Connect to pendant microcontroller via serial port."""
@@ -103,22 +103,6 @@ class PendantBridge:
         await event_received.wait()
         return True
 
-    def setup_cncjs_handlers(self):
-        """Register Socket.IO handlers for GRBL responses."""
-
-        @self.sio.on('serialport:read')
-        async def on_serialport_read(data):
-            self._on_grbl_response(data)
-
-    def _on_grbl_response(self, data):
-        if not self._awaiting_ok or not isinstance(data, str):
-            return
-
-        line = data.strip().lower()
-        if line == 'ok' or line.startswith('error:') or line.startswith('alarm:'):
-            self._awaiting_ok = False
-            self._ok_event.set()
-
     def parse_pendant_message(self, message_str):
         """Parse JSON message from pendant microcontroller."""
         try:
@@ -156,8 +140,6 @@ class PendantBridge:
 
     def _reset_jog_state(self):
         self._jog_pending = None
-        self._awaiting_ok = False
-        self._ok_event.set()
         self._jog_notify.set()
 
     def note_pendant_message(self, pendant_data):
@@ -186,27 +168,29 @@ class PendantBridge:
             self._jog_notify.set()
 
     async def jog_send_loop(self):
-        """Send jog commands one at a time, waiting for GRBL ok between writes."""
+        """Send jog commands at least 100ms apart, accumulating commands that arrive sooner."""
         while self.running:
-            if self._awaiting_ok:
-                await self._ok_event.wait()
-                self._ok_event.clear()
-                continue
-
             if self._jog_pending:
-                pending = self._jog_pending
-                self._jog_pending = None
-                gcode = self._format_jog_gcode(pending)
-                self._awaiting_ok = True
-                self._ok_event.clear()
-                try:
-                    await self.write_to_grbl(f"{gcode}\n")
-                    logger.info(f"Sent G-code: {gcode}")
-                except Exception as e:
-                    logger.error(f"Failed to send G-code: {e}")
-                    self._awaiting_ok = False
-                    self._ok_event.set()
-                    self._jog_pending = pending
+                # Calculate time until next write is allowed
+                current_time = time.monotonic()
+                time_since_last_write = current_time - self._last_write_time
+                remaining_wait = max(0, COMMAND_WRITE_INTERVAL - time_since_last_write)
+                
+                if remaining_wait > 0:
+                    await asyncio.sleep(remaining_wait)
+                
+                # Check if we still have a pending jog after the wait
+                if self._jog_pending:
+                    pending = self._jog_pending
+                    self._jog_pending = None
+                    gcode = self._format_jog_gcode(pending)
+                    try:
+                        await self.write_to_grbl(f"{gcode}\n")
+                        self._last_write_time = time.monotonic()
+                        logger.info(f"Sent G-code: {gcode}")
+                    except Exception as e:
+                        logger.error(f"Failed to send G-code: {e}")
+                        self._jog_pending = pending
                 continue
 
             self._jog_notify.clear()
@@ -272,6 +256,7 @@ class PendantBridge:
         self._reset_jog_state()
         try:
             await self.write_to_grbl(GRBL_JOG_CANCEL)
+            self._last_write_time = time.monotonic()
             logger.info("Sent jog cancel (0x85) to flush queued jog commands")
         except Exception as e:
             logger.error(f"Failed to flush jog queue: {e}")
@@ -297,8 +282,6 @@ class PendantBridge:
                 self.serial_connection.close()
             await self.sio.disconnect()
             return
-
-        self.setup_cncjs_handlers()
 
         # Start reading pendant data, jog sender, and idle jog flush monitor
         flush_task = asyncio.create_task(self.check_jog_idle_flush())
