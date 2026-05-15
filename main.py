@@ -23,17 +23,21 @@ DEFAULT_CNCJS_PORT = 8000
 PENDANT_REPORT_INTERVAL = 0.02  # 20ms minimum
 JOG_FEED_RATE = 1000  # F1000
 SERIAL_READ_TIMEOUT = 0.1  # 100ms
+JOG_IDLE_FLUSH_TIMEOUT = 0.1  # flush jog queue after 100ms without pendant reports
 
 class PendantBridge:
-    def __init__(self, serial_port, baudrate, cncjs_url, cncjs_port):
+    def __init__(self, serial_port, baudrate, cncjs_url, cncjs_port, jog_idle_flush_timeout):
         self.serial_port = serial_port
         self.baudrate = baudrate
         self.cncjs_url = cncjs_url
         self.cncjs_port = cncjs_port
+        self.jog_idle_flush_timeout = jog_idle_flush_timeout
         self.serial_connection = None
         self.sio = socketio.AsyncClient()
         self.grbl_port = None
         self.running = True
+        self.last_pendant_message_time = None
+        self.jog_flush_pending = False
 
     async def connect_serial(self):
         """Connect to pendant microcontroller via serial port."""
@@ -129,6 +133,19 @@ class PendantBridge:
 
         return commands
 
+    def note_pendant_message(self, pendant_data):
+        """Record pendant activity and whether a jog flush may be needed."""
+        self.last_pendant_message_time = time.monotonic()
+
+        if pendant_data.get('emg'):
+            self.jog_flush_pending = False
+            return
+
+        axis = pendant_data.get('ax')
+        ticks = pendant_data.get('mv', 0)
+        if axis and ticks != 0:
+            self.jog_flush_pending = True
+
     async def read_pendant_data(self):
         """Read and process data from pendant."""
         buffer = ""
@@ -145,6 +162,7 @@ class PendantBridge:
                         message = self.parse_pendant_message(line)
 
                         if message:
+                            self.note_pendant_message(message)
                             gcode_commands = self.pendant_to_gcode(message)
                             for cmd in gcode_commands:
                                 await self.send_gcode(cmd)
@@ -155,6 +173,19 @@ class PendantBridge:
                 logger.error(f"Error reading pendant data: {e}")
                 await asyncio.sleep(PENDANT_REPORT_INTERVAL)
 
+    async def check_jog_idle_flush(self):
+        """Flush queued jog commands when the pendant stops reporting."""
+        while self.running:
+            if (
+                self.jog_flush_pending
+                and self.last_pendant_message_time is not None
+                and time.monotonic() - self.last_pendant_message_time >= self.jog_idle_flush_timeout
+            ):
+                await self.flush_jog_queue()
+                self.jog_flush_pending = False
+
+            await asyncio.sleep(PENDANT_REPORT_INTERVAL)
+
     async def send_gcode(self, command):
         """Send G-code command to CNCjs via Socket.IO."""
         try:
@@ -162,6 +193,14 @@ class PendantBridge:
             logger.info(f"Sent G-code: {command}")
         except Exception as e:
             logger.error(f"Failed to send G-code: {e}")
+
+    async def flush_jog_queue(self):
+        """Cancel GRBL jogging and flush remaining jog commands in CNCjs."""
+        try:
+            await self.sio.emit('command', (self.grbl_port, 'jogCancel'))
+            logger.info("Sent jogCancel to flush queued jog commands")
+        except Exception as e:
+            logger.error(f"Failed to flush jog queue: {e}")
 
     async def run(self):
         """Main run loop for the bridge."""
@@ -185,7 +224,8 @@ class PendantBridge:
             await self.sio.disconnect()
             return
 
-        # Start reading pendant data
+        # Start reading pendant data and idle jog flush monitor
+        flush_task = asyncio.create_task(self.check_jog_idle_flush())
         try:
             await self.read_pendant_data()
         except KeyboardInterrupt:
@@ -194,6 +234,11 @@ class PendantBridge:
             logger.error(f"Bridge error: {e}")
         finally:
             self.running = False
+            flush_task.cancel()
+            try:
+                await flush_task
+            except asyncio.CancelledError:
+                pass
             if self.serial_connection:
                 self.serial_connection.close()
             await self.sio.disconnect()
@@ -225,6 +270,15 @@ def main():
         default=DEFAULT_CNCJS_PORT,
         help=f'Port of the CNCjs server (default: {DEFAULT_CNCJS_PORT})'
     )
+    parser.add_argument(
+        '-t', '--jog-flush-timeout',
+        type=float,
+        default=JOG_IDLE_FLUSH_TIMEOUT,
+        help=(
+            'Seconds without pendant reports before sending jogCancel to flush '
+            f'the jog queue (default: {JOG_IDLE_FLUSH_TIMEOUT})'
+        )
+    )
 
     args = parser.parse_args()
 
@@ -237,7 +291,8 @@ def main():
         serial_port=args.serial,
         baudrate=args.baudrate,
         cncjs_url=args.url,
-        cncjs_port=args.port
+        cncjs_port=args.port,
+        jog_idle_flush_timeout=args.jog_flush_timeout,
     )
 
     asyncio.run(bridge.run())

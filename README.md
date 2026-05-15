@@ -9,10 +9,19 @@ The script takes arguments for the serial port of the pendant microcontroller, a
 | `-b`, `--baudrate` | Baud rate used to communicate with the pendant microcontroller. Default is `115200`. |
 | `-p`, `--port` | Port of the CNCjs server. Default is `8000`. |
 | `-u`, `--url` | URL of the CNCjs server. Default is `http://localhost`. |
+| `-t`, `--jog-flush-timeout` | Seconds without pendant reports before sending `jogCancel` to flush queued jog commands. Default is `0.1`. |
 
 The software waits until the CNCjs server becomes available in case the server is launched after this application.
 
 Once connected to the CNCjs server, the application automatically detects the serial port of the GRBL board connected to CNCjs and waits until the server is ready to accept G-code commands.
+
+## Requirements
+
+| Component | Version | Notes |
+|---|---|---|
+| CNCjs | **v1.10.4** or later | Required for the `jogCancel` command used by [Jog Queue Flush](#jog-queue-flush). The command was added in [cncjs/cncjs#512](https://github.com/cncjs/cncjs/pull/512) (merged 2024-10-02). Older CNCjs releases still accept jog G-code via `write`, but queued jog motion will not be flushed when the dial stops. |
+| GRBL | **v1.1** or later | Required for `$J=` jog commands and the jog-cancel realtime command (`0x85`) that `jogCancel` sends. |
+| Python | **3.14** or later | See `requires-python` in `pyproject.toml`. |
 
 ## Build and Execution Instructions
 
@@ -53,6 +62,16 @@ While the emergency stop switch is active, reports are periodically sent at the 
 
 The minimum report interval is `20ms`. Jog dial movement occurring within the interval is accumulated and reported in the next message.
 
+When the jog dial is not moving, the pendant sends no reports. While the emergency stop switch is active, reports continue at the minimum interval.
+
+## Jog Queue Flush
+
+Each jog dial rotation sends a `$J=G91` command to CNCjs. If the machine cannot keep up, commands accumulate in the queue and the axis may keep moving briefly after the dial stops.
+
+This application watches for the absence of pendant reports. After jog movement has been sent, if no report is received for `--jog-flush-timeout` seconds (default `0.1`), it sends CNCjs the `jogCancel` command. That command maps to GRBL’s jog-cancel realtime character (`0x85`) and clears remaining jog motion from the buffer.
+
+Set the timeout longer than the pendant’s minimum report interval (`20ms`). Increase it if jog is cancelled too early during slow dial turns; decrease it if the machine coasts too long after you stop jogging.
+
 ## CNCjs Specification
 
 This application maps the reported pendant status to G-code commands and sends them to the CNCjs server.
@@ -65,12 +84,15 @@ The jog dial movement (`mv`) is interpreted as `0.001mm` per tick and multiplied
 rt * mv * 0.001mm
 ```
 
-This application sends the following G-code commands:
+This application sends the following commands to CNCjs:
 
-| G-code Command Example | Description |
+| Command | Description |
 |---|---|
 | `$J=G91 X1 F1000` | Jog command sent for reports with non-zero movement. The command consists of the selected axis (`X`, `Y`, `Z`, etc.), the calculated movement amount, and a fixed feed rate of `F1000`. |
 | `!` | Every report with `emg=1` is mapped to the GRBL feed hold / emergency stop command. |
+| `jogCancel` | Sent via the Socket.IO `command` event when jogging stops and no pendant report arrives within `--jog-flush-timeout`. Cancels the current jog and flushes queued jog commands. Requires CNCjs **v1.10.4+** and GRBL **v1.1+** (see [Requirements](#requirements)). |
+
+G-code jog commands are sent with the Socket.IO `write` event. `jogCancel` is sent with the `command` event.
 
 The application also listens to CNCjs Socket.IO events to handle GRBL board connections.
 
